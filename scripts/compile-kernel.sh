@@ -120,6 +120,11 @@ MAKE_ARGS=(
   "HOSTCC=ccache clang"
   "HOSTCXX=ccache clang++"
 )
+MAKE_JOBS="${KERNEL_BUILD_JOBS:-$(nproc)}"
+if [[ "$BUILD_MODE" != "Patch/config validation only" && "$KSU_TYPE" == BakaSU-with-susfs* && "$MAKE_JOBS" -gt 2 ]]; then
+  MAKE_JOBS=2
+fi
+echo "[config] Using make -j${MAKE_JOBS}"
 if [[ -n "$KERNEL_MAKE_FLAGS" ]]; then
   read -r -a KERNEL_MAKE_FLAG_ARRAY <<< "$KERNEL_MAKE_FLAGS"
   for make_flag in "${KERNEL_MAKE_FLAG_ARRAY[@]}"; do
@@ -304,12 +309,12 @@ if [[ "$BUILD_MODE" == "Patch/config validation only" ]]; then
     COMPILE_STARTED_AT="$(date +%s)"
     # A partial driver build does not visit the directories that generate
     # compile.h and the SELinux flask/permission headers used by KernelSU.
-    if ! make -j"$(nproc)" "${MAKE_ARGS[@]}" init/ security/selinux/; then
+    if ! make -j"${MAKE_JOBS}" "${MAKE_ARGS[@]}" init/ security/selinux/; then
       COMPILE_SECONDS=$((COMPILE_SECONDS + $(date +%s) - COMPILE_STARTED_AT))
       echo '::error::KernelSU generated-header preparation failed.'
       exit 1
     fi
-    if ! make -j"$(nproc)" "${MAKE_ARGS[@]}" "${SMOKE_TARGETS[@]}" 2>&1 | tee integration-smoke.log; then
+    if ! make -j"${MAKE_JOBS}" "${MAKE_ARGS[@]}" "${SMOKE_TARGETS[@]}" 2>&1 | tee integration-smoke.log; then
       COMPILE_SECONDS=$((COMPILE_SECONDS + $(date +%s) - COMPILE_STARTED_AT))
       echo "::error::KernelSU/SUSFS/NoMount/ZeroMount/KPM integration object smoke compile failed."
       exit 1
@@ -349,7 +354,7 @@ COMPILE_STARTED_AT="$(date +%s)"
   done
 ) &
 BUILD_RESOURCE_MONITOR_PID=$!
-if ! make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee build.log; then
+if ! make -j"${MAKE_JOBS}" "${MAKE_ARGS[@]}" Image 2>&1 | tee build.log; then
   COMPILE_SECONDS=$(($(date +%s) - COMPILE_STARTED_AT))
   ccache --show-stats || true
   echo "==== BUILD ERROR SUMMARY ===="
