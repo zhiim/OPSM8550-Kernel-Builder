@@ -269,7 +269,8 @@ verify_susfs_hook_linkage() {
   local driver_objects="out/${KSU_DRIVER_DIR:?}/kernelsu"
   local object_file definitions required missing
   local caller_objects=(out/fs/exec.o out/security/selinux/hooks.o out/security/selinux/selinuxfs.o)
-  local provider_objects=(out/fs/susfs.o)
+  # Newer SUSFS defines its SELinux helpers in the kernel's services.o.
+  local provider_objects=(out/fs/susfs.o out/security/selinux/ss/services.o)
   local ksu_objects=()
 
   [[ -x "$llvm_nm" && -d "$driver_objects" ]] || {
@@ -294,7 +295,7 @@ verify_susfs_hook_linkage() {
     | awk '$2 == "U" && $1 ~ /^(__)?ksu_|^susfs_|^my_/ {print $1}' | sort -u)" || return 1
   missing="$(comm -23 <(printf '%s\n' "$required") <(printf '%s\n' "$definitions"))"
   if [[ -n "$missing" ]]; then
-    echo "::error::SUSFS kernel hooks require symbols absent from the selected KernelSU driver:"
+    echo "::error::SUSFS kernel hooks require symbols absent from the compiled kernel/KernelSU objects:"
     printf '%s\n' "$missing"
     return 1
   fi

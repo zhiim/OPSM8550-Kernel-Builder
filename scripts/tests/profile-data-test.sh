@@ -708,7 +708,7 @@ done
 (
   hook_fixture="${NOMOUNT_FIXTURE_DIR}/susfs-hook-linkage"
   mkdir -p "$hook_fixture/toolchain" "$hook_fixture/out/fs" \
-    "$hook_fixture/out/security/selinux" "$hook_fixture/out/drivers/kernelsu"
+    "$hook_fixture/out/security/selinux/ss" "$hook_fixture/out/drivers/kernelsu"
   cd "$hook_fixture"
   CLANG_ROOT="$hook_fixture/toolchain"
   KSU_DRIVER_DIR=drivers
@@ -734,6 +734,7 @@ EOF
   printf '%s\n' 'void local_selinux_hook(void) {}' > caller.c
   "${hook_cc[@]}" -c caller.c -o out/security/selinux/hooks.o
   "${hook_cc[@]}" -c caller.c -o out/security/selinux/selinuxfs.o
+  "${hook_cc[@]}" -c caller.c -o out/security/selinux/ss/services.o
   verify_susfs_hook_linkage >/dev/null \
     || fail "matching legacy SUSFS hook ABI was rejected"
   cat > caller.c <<'EOF'
@@ -762,6 +763,34 @@ EOF
   "${hook_cc[@]}" -c provider.c -o out/drivers/kernelsu/provider.o
   verify_susfs_hook_linkage >/dev/null \
     || fail "SUSFS hook validation rejected global definitions of the required hooks"
+
+  # SUSFS e22ceec7 defines these in SELinux services, outside the root driver.
+  cat > caller.c <<'EOF'
+extern void susfs_security_compute_av_user(void);
+extern void susfs_security_context_str_to_sid(void), susfs_security_context_to_sid(void);
+void selinux_hooks(void) {
+  susfs_security_compute_av_user();
+  susfs_security_context_str_to_sid(); susfs_security_context_to_sid();
+}
+EOF
+  "${hook_cc[@]}" -c caller.c -o out/security/selinux/selinuxfs.o
+  cat > services.c <<'EOF'
+void susfs_security_compute_av_user(void) {}
+void susfs_security_context_str_to_sid(void) {}
+void susfs_security_context_to_sid(void) {}
+EOF
+  "${hook_cc[@]}" -c services.c -o out/security/selinux/ss/services.o
+  verify_susfs_hook_linkage >/dev/null \
+    || fail "SUSFS hook validation ignored the kernel's SELinux service definitions"
+  printf '%s\n' 'void unrelated_service(void) {}' > services.c
+  "${hook_cc[@]}" -c services.c -o out/security/selinux/ss/services.o
+  if verify_susfs_hook_linkage > missing.log 2>&1; then
+    fail "SUSFS hook validation accepted missing SELinux service definitions"
+  fi
+  for missing_hook in susfs_security_compute_av_user susfs_security_context_str_to_sid \
+    susfs_security_context_to_sid; do
+    grep -Fxq "$missing_hook" missing.log || fail "missing hook was not reported: $missing_hook"
+  done
 )
 
 mkdir -p "$ZEROMOUNT_FIXTURE_DIR/fs"
