@@ -114,6 +114,16 @@ on:
         options:
           - Strict GKI module checks (default)
           - Use existing ROM system_dlkm modules (experimental)
+      build_rekernel:
+        description: Also build a matching ReKernel-X module after the kernel (full builds only)
+        required: false
+        type: boolean
+        default: false
+      rekernel_ref:
+        description: zhiim/ReKernel-X commit, tag, or branch to build
+        required: false
+        type: string
+        default: '8527e9f59b26e45d459f3081f7edf0f4d4d290b0'
 
 permissions:
   contents: read
@@ -267,6 +277,7 @@ jobs:
             gcc-aarch64-linux-gnu \
             git \
             jq \
+            kmod \
             libdw-dev \
             libelf-dev \
             libssl-dev \
@@ -339,6 +350,29 @@ jobs:
           retention-days: 14
           compression-level: 6
           path: ${{ github.workspace }}/release-assets/
+
+      - name: Checkout ReKernel-X
+        if: inputs.build_rekernel && inputs.build_mode != 'Patch/config validation only'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zhiim/ReKernel-X
+          ref: ${{ inputs.rekernel_ref }}
+          path: rekernel-source
+          persist-credentials: false
+
+      - name: Build matching ReKernel-X module
+        id: rekernel
+        if: inputs.build_rekernel && inputs.build_mode != 'Patch/config validation only'
+        run: bash scripts/build-rekernel.sh
+
+      - name: Upload ReKernel-X package and build log
+        if: ${{ always() && steps.rekernel.outcome != 'skipped' && steps.rekernel.outcome != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rekernel-x-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.resolve.outputs.ksu_type }}
+          path: ${{ github.workspace }}/rekernel-output/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload build diagnostics
         if: always() && steps.resolve.outcome == 'success'
