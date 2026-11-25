@@ -182,6 +182,7 @@ if [[ -n "$KSU_REPO" && -z "$KSU_COMMIT" ]]; then
   fi
 fi
 
+NOMOUNT_COMMIT=""
 SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
 SUSFS_REF=""
 SUSFS_COMMIT=""
@@ -199,8 +200,16 @@ if [[ "$KSU_TYPE" == *susfs* ]]; then
       SUSFS_COMMIT="$(kernelsu_next_zeromount_susfs_commit "$SUSFS_REF")"
       ;;
     KernelSU-Next-with-susfs*)
-      SUSFS_MIN_VERSION="2.4.0"
-      SUSFS_COMMIT="$(kernelsu_next_susfs_commit "$SUSFS_REF")"
+      if [[ "$KSU_TYPE" == KernelSU-Next-with-susfs-nomount &&
+            "$PROFILE_ID" == sm8550-oneplus11-12r-crdroid && "$SUSFS_REF" == gki-android14-5.15 ]]; then
+        # Keep the revisions from the successful full NoMount build together.
+        KSU_COMMIT="40f77cdb4ab3ad463334e87a2168a7e45bd8bcfe"
+        SUSFS_COMMIT="2babc11f865b77c1fb867674a58d11b9387917ee"
+        NOMOUNT_COMMIT="bf1847f98fed382369c43bfd652cd93774b9b8e3"
+      else
+        SUSFS_MIN_VERSION="2.4.0"
+        SUSFS_COMMIT="$(kernelsu_next_susfs_commit "$SUSFS_REF")"
+      fi
       ;;
     SukiSU-Ultra-with-susfs-KPM|SukiSU-Ultra-with-susfs-nomount-KPM|SukiSU-Ultra-with-susfs-zeromount-KPM|BakaSU-with-susfs|BakaSU-with-susfs-nomount|BakaSU-with-susfs-zeromount)
       SUSFS_COMMIT="$(su_session_compatible_susfs_commit "$SUSFS_REF")"
@@ -230,7 +239,6 @@ fi
 
 NOMOUNT_REPO="https://github.com/maxsteeel/nomount.git"
 NOMOUNT_REF=""
-NOMOUNT_COMMIT=""
 if [[ "$KSU_TYPE" == *nomount* ]]; then
   if [[ "$KSU_TYPE" == FinaSU* ]]; then
     # Match the Manager/ksud wire ABI with FinaSU's vendored driver.
@@ -239,8 +247,10 @@ if [[ "$KSU_TYPE" == *nomount* ]]; then
     NOMOUNT_COMMIT="$FINASU_COMMIT"
   else
     NOMOUNT_REF="master"
-    NOMOUNT_COMMIT="$(git_ls_remote_retry --exit-code "$NOMOUNT_REPO" "refs/heads/${NOMOUNT_REF}" \
-      | awk 'NR == 1 {print $1}')"
+    if [[ -z "$NOMOUNT_COMMIT" ]]; then
+      NOMOUNT_COMMIT="$(git_ls_remote_retry --exit-code "$NOMOUNT_REPO" "refs/heads/${NOMOUNT_REF}" \
+        | awk 'NR == 1 {print $1}')"
+    fi
   fi
   if [[ ! "$NOMOUNT_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
     echo "::error::Could not resolve NoMount branch '$NOMOUNT_REF' to a commit."
