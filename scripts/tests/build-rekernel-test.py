@@ -115,6 +115,17 @@ printf 'fixture only' > "$4/fixture-module.zip"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not contain build-custom-lkm.sh", result.stdout)
 
+    def test_android_batch_disambiguates_version_and_pairing(self):
+        self.env.update(ANDROID_BATCH_BUILD="1", SUPPORTED_ANDROID_VERSIONS="16")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            "version=custom-r123.2-KernelSU-Next-with-susfs-nomount-A16",
+            (self.dest / "build.log").read_text(),
+        )
+        self.assertIn("android_variant=A16", (self.dest / "pairing-info.txt").read_text())
+        self.assertIn("(A16)", self.summary.read_text())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
