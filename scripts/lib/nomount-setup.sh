@@ -9,10 +9,10 @@ detect_nomount_version() {
   local header="${source_dir}/nomount.h"
   local version
   local commit_count
+  local checkout_dir
+  local count_format=""
 
-  # Older releases use a literal; v21 composes the base version with the
-  # checkout's commit count passed by its Makefile. Match the compiled value,
-  # including the count from our shallow, exact-commit checkout.
+  # Match the kernel version string, including the count from shallow checkouts.
   version="$(sed -nE 's/^[[:space:]]*#define[[:space:]]+NOMOUNT_VERSION[[:space:]]+"([^"]+)"[[:space:]]*$/\1/p' "$header" | head -n 1)"
   if [[ -n "$version" ]]; then
     printf '%s\n' "$version"
@@ -23,10 +23,25 @@ detect_nomount_version() {
   [[ -n "$version" ]] || return 1
   grep -Eq '^[[:space:]]*#define[[:space:]]+NOMOUNT_VERSION[[:space:]]+NOMOUNT_BASE_VERSION[[:space:]]*$' "$header" || return 1
   if grep -Eq '^[[:space:]]*#define[[:space:]]+NOMOUNT_VERSION[[:space:]]+NOMOUNT_BASE_VERSION[[:space:]]+"-"[[:space:]]+NOMOUNT_COMMIT_COUNT[[:space:]]*$' "$header"; then
+    count_format=hyphen
+  elif grep -Eq '^[[:space:]]*#define[[:space:]]+NOMOUNT_VERSION[[:space:]]+""NOMOUNT_BASE_VERSION" \("NOMOUNT_COMMIT_COUNT"\)"[[:space:]]*$' "$header"; then
+    # Newer Kbuilds only pass a count for a standalone NoMount checkout.
+    # When the driver is vendored, the version is the base protocol number.
+    checkout_dir="$(git -C "$source_dir" rev-parse --show-toplevel 2>/dev/null)" || checkout_dir=""
+    if [[ -n "$checkout_dir" && -d "$checkout_dir/.git" ]] &&
+       git -C "$checkout_dir" remote get-url origin 2>/dev/null | grep -q 'nomount'; then
+      count_format=parentheses
+    fi
+  fi
+  if [[ -n "$count_format" ]]; then
     grep -Fq 'ccflags-y += -DNOMOUNT_COMMIT_COUNT=\"$(NOMOUNT_COMMITS)\"' "${source_dir}/Makefile" || return 1
     commit_count="$(git -C "$source_dir" rev-list --count HEAD)" || return 1
     [[ "$commit_count" =~ ^[0-9]+$ ]] || return 1
-    version="${version}-${commit_count}"
+    if [[ "$count_format" == hyphen ]]; then
+      version="${version}-${commit_count}"
+    else
+      version="${version} (${commit_count})"
+    fi
   fi
   printf '%s\n' "$version"
 }
@@ -61,6 +76,22 @@ install_nomount() {
   local ref="$2"
   local commit="$3"
   local repo_dir="NoMount"
+
+  rm -rf "$repo_dir"
+  git init -q "$repo_dir"
+  git -C "$repo_dir" remote add origin "$repo"
+  git_fetch_retry "$repo_dir" --depth=1 --no-tags origin "$commit"
+  git -C "$repo_dir" checkout -q --detach FETCH_HEAD
+  test "$(git -C "$repo_dir" rev-parse HEAD)" = "$commit" || {
+    echo "::error::NoMount checkout does not match resolved commit $commit ($ref)."
+    exit 1
+  }
+  wire_nomount_source "$repo_dir/kernel/src" "$ref" "$commit"
+}
+
+# Wire either an upstream checkout or FinaSU's ABI-matched vendored source.
+wire_nomount_source() {
+  local source_dir="$1" ref="$2" commit="$3"
   local fs_dir
   local kconfig_source
   local version
@@ -74,23 +105,13 @@ install_nomount() {
     exit 1
   fi
 
-  rm -rf "$repo_dir"
-  git init -q "$repo_dir"
-  git -C "$repo_dir" remote add origin "$repo"
-  git_fetch_retry "$repo_dir" --depth=1 --no-tags origin "$commit"
-  git -C "$repo_dir" checkout -q --detach FETCH_HEAD
-  test "$(git -C "$repo_dir" rev-parse HEAD)" = "$commit" || {
-    echo "::error::NoMount checkout does not match resolved commit $commit ($ref)."
-    exit 1
-  }
-
-  test -f "$repo_dir/kernel/src/nomount.c"
-  test -f "$repo_dir/kernel/src/nomount.h"
-  test -f "$repo_dir/kernel/src/Kconfig"
-  test -f "$repo_dir/kernel/src/Makefile"
+  test -f "$source_dir/nomount.c"
+  test -f "$source_dir/nomount.h"
+  test -f "$source_dir/Kconfig"
+  test -f "$source_dir/Makefile"
 
   rm -rf "$fs_dir/nomount"
-  ln -s "$(realpath --relative-to="$fs_dir" "$repo_dir/kernel/src")" "$fs_dir/nomount"
+  ln -s "$(realpath --relative-to="$fs_dir" "$source_dir")" "$fs_dir/nomount"
   ensure_line_in_file "$fs_dir/Makefile" 'obj-$(CONFIG_NOMOUNT) += nomount/'
   kconfig_source="source \"${fs_dir}/nomount/Kconfig\""
   insert_line_before_last_match "$fs_dir/Kconfig" "endmenu" "$kconfig_source" || {
@@ -98,7 +119,7 @@ install_nomount() {
     exit 1
   }
 
-  if ! version="$(detect_nomount_version "$repo_dir/kernel/src")"; then
+  if ! version="$(detect_nomount_version "$source_dir")"; then
     echo "::error::Could not detect the integrated NoMount version."
     exit 1
   fi

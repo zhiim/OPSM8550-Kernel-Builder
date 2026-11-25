@@ -17,6 +17,7 @@ list_build_profiles() {
     "SM8550 | OnePlus 11 / 12R | LineageOS (recommended)" \
     "SM8550 | OnePlus 11 / 12R | crDroid" \
     "SM8550 | OnePlus 12R | development" \
+    "SM8550 | OnePlus 12R | Lunaris-AOSP" \
     "SM8650 | OnePlus 12 | OnePlus official" \
     "SM8650 | OnePlus 12 | LineageOS (recommended)" \
     "SM8650 | OnePlus 12 | crDroid"
@@ -29,6 +30,7 @@ resolve_build_profile() {
   # the same branch for the kernel and modules. Source-specific profiles can
   # override those defaults without complicating the common resolver path.
   KERNEL_REPO_OVERRIDE=""
+  REQUIRED_KERNEL_BRANCH=""
   MODULES_REPO_OVERRIDE=""
   MODULES_BRANCH_OVERRIDE=""
   KERNEL_MAKE_FLAGS=""
@@ -124,6 +126,17 @@ resolve_build_profile() {
       KERNEL_SOURCE="OnePlus12R-development"
       SOURCE_LAYOUT="community-flat"
       ;;
+    "SM8550 | OnePlus 12R | Lunaris-AOSP")
+      PROFILE_ID="sm8550-oneplus12r-lunaris-aosp"
+      SOC="sm8550"
+      TARGET_NAME="OnePlus 12R"
+      DEVICE_CODENAMES="aston"
+      DEVICE_NAMES="aston OP5D35L1"
+      KERNEL_SOURCE="gaurav-paul9"
+      SOURCE_LAYOUT="community-flat"
+      # This maintainer shares these repositories with other ROMs.
+      REQUIRED_KERNEL_BRANCH="lunaris-16.2"
+      ;;
     "SM8650 | OnePlus 12 | OnePlus official")
       PROFILE_ID="sm8650-oneplus12-official"
       SOC="sm8650"
@@ -215,6 +228,10 @@ resolve_build_profile() {
       SOURCE_NAME="LunarisOS (OnePlus 11)"
       SOURCE_SLUG="lunarisos"
       ;;
+    gaurav-paul9)
+      SOURCE_NAME="Lunaris-AOSP (OnePlus 12R)"
+      SOURCE_SLUG="lunaris-aosp"
+      ;;
     lineage-ovaltine-dev)
       SOURCE_NAME="LineageOS community (ovaltine)"
       SOURCE_SLUG="lineage-community"
@@ -244,6 +261,9 @@ resolve_root_solution() {
     "KernelSU-Next + SUSFS + ZeroMount (experimental)") KSU_TYPE="KernelSU-Next-with-susfs-zeromount" ;;
     "KowSU") KSU_TYPE="KowSU" ;;
     "FinaSU (experimental)") KSU_TYPE="FinaSU" ;;
+    "FinaSU + SUSFS (experimental)") KSU_TYPE="FinaSU-with-susfs" ;;
+    "FinaSU + NoMount (experimental)") KSU_TYPE="FinaSU-with-nomount" ;;
+    "FinaSU + SUSFS + NoMount (experimental)") KSU_TYPE="FinaSU-with-susfs-nomount" ;;
     "SukiSU Ultra + KPM (experimental)") KSU_TYPE="SukiSU-Ultra-with-KPM" ;;
     "SukiSU Ultra + SUSFS + KPM (experimental)") KSU_TYPE="SukiSU-Ultra-with-susfs-KPM" ;;
     "SukiSU Ultra + SUSFS + ZeroMount + KPM (experimental)") KSU_TYPE="SukiSU-Ultra-with-susfs-zeromount-KPM" ;;
@@ -274,7 +294,7 @@ resolve_clang_version() {
         lineage-21*|fourteen*|android14*|14.*|oneplus/*_u_14*|oneplus_*_u_14*) CLANG_VERSION="clang-r487747c" ;;
         lineage-22*|fifteen*|android15*|15.*|oneplus/*_v_15*|oneplus_*_v_15*) CLANG_VERSION="clang-r536225" ;;
         lineage-23.0*) CLANG_VERSION="clang-r547379" ;;
-        16.0|lineage-23*|sixteen*|android16*|16.*|oneplus/*_b_16*|oneplus_*_b_16*) CLANG_VERSION="clang-r563880c" ;;
+        16.0|lineage-23*|sixteen*|lunaris-16.2|android16*|16.*|oneplus/*_b_16*|oneplus_*_b_16*) CLANG_VERSION="clang-r563880c" ;;
         *)
           CLANG_VERSION="clang-r563880c"
           echo "::warning::Could not confidently infer clang for '$branch'; using $CLANG_VERSION."
@@ -352,6 +372,27 @@ su_session_compatible_susfs_commit() {
   esac
 }
 
+kernelsu_next_susfs_commit() {
+  case "$1" in
+    gki-android13-5.10) echo d480b312d650601888550529695706f4a112e29e ;;
+    gki-android13-5.15) echo c1d1da42b74771944207ec45aaceff9c57e84985 ;;
+    gki-android14-5.15) echo a293ab199ff84b7482d57ece06b4199411cd5c01 ;;
+    gki-android14-6.1) echo f76b81f2a6bf98e4029cc0c823c054edbec29803 ;;
+    *) echo "::error::No KernelSU-Next-compatible SUSFS revision for $1" >&2; return 1 ;;
+  esac
+}
+
+kernelsu_next_zeromount_susfs_commit() {
+  # The pinned ZeroMount patches expect the v2.3.0 VFS layout.
+  case "$1" in
+    gki-android13-5.10) echo cfa82d53371b2dacb3ed79e31cb62a9cc349b5d5 ;;
+    gki-android13-5.15) echo e30f1502a870434150efb16bd4a0d33277d7da57 ;;
+    gki-android14-5.15) echo 251a2ec4038ba241609fb4ad032ea0990cffa691 ;;
+    gki-android14-6.1) echo ee155a1ad4219804a7c54cb39dd4fa1b5c2a3fa4 ;;
+    *) echo "::error::No ZeroMount-compatible KernelSU-Next SUSFS revision for $1" >&2; return 1 ;;
+  esac
+}
+
 infer_android_versions() {
   local branch="$1"
 
@@ -361,7 +402,7 @@ infer_android_versions() {
     lineage-20*|thirteen*|android13*|13.*|oneplus/*_t_13*|oneplus_*_t_13*) SUPPORTED_ANDROID_VERSIONS="13" ;;
     lineage-21*|fourteen*|android14*|14.*|oneplus/*_u_14*|oneplus_*_u_14*) SUPPORTED_ANDROID_VERSIONS="14" ;;
     lineage-22*|fifteen*|android15*|15.*|oneplus/*_v_15*|oneplus_*_v_15*) SUPPORTED_ANDROID_VERSIONS="15" ;;
-    16.0|lineage-23*|sixteen*|android16*|16.*|oneplus/*_b_16*|oneplus_*_b_16*) SUPPORTED_ANDROID_VERSIONS="16" ;;
+    16.0|lineage-23*|sixteen*|lunaris-16.2|android16*|16.*|oneplus/*_b_16*|oneplus_*_b_16*) SUPPORTED_ANDROID_VERSIONS="16" ;;
     *) SUPPORTED_ANDROID_VERSIONS="" ;;
   esac
 }

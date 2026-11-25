@@ -114,6 +114,7 @@ verify_kpm_binary_presence() {
 verify_susfs_source_integration() {
   local ksu_kernel_dir="$1"
   local runtime_file="${ksu_kernel_dir}/runtime/ksud_integration.c"
+  local symbol
 
   test -f fs/susfs.c || {
     echo "::error::fs/susfs.c is missing after applying susfs patches."
@@ -150,7 +151,7 @@ verify_susfs_source_integration() {
     exit 1
   }
 
-  if grep -R -q 'ksu_selinux_hide_running' security/selinux; then
+  if grep -R -q '\bfake_state\b' security/selinux; then
     local fake_state_def_re='^[[:space:]]*(__[A-Za-z0-9_]+[[:space:]]+)*struct[[:space:]]+selinux_state[[:space:]]+fake_state([[:space:];=]|$)'
     local running_def_re='^[[:space:]]*(__[A-Za-z0-9_]+[[:space:]]+)*bool[[:space:]]+ksu_selinux_hide_running([[:space:];=]|$)'
 
@@ -162,6 +163,13 @@ verify_susfs_source_integration() {
       echo "::error::KernelSU tree does not define ksu_selinux_hide_running required by the susfs SELinux hooks."
       exit 1
     }
+  fi
+
+  if [[ "$KSU_TYPE" == FinaSU* ]]; then
+    sh "$ksu_kernel_dir/tools/check_susfs_inline.sh" . || return 1
+    for symbol in fake_status fake_status_initialize_key initialize_fake_status ksu_selinux_hide_running my_write_context my_write_access my_setprocattr; do
+      grep -q "$symbol" "$ksu_kernel_dir/feature/selinux_hide.c" || return 1
+    done
   fi
 
   if [[ "$KSU_TYPE" == BakaSU* ]]; then
@@ -261,17 +269,21 @@ verify_susfs_binary_presence() {
   } | tee susfs-proof.txt
 }
 
-# A partial Kbuild succeeds with unresolved hooks. Compare the kernel callers
-# with global driver definitions so validation catches ABI drift before Image's
-# final link, including LLVM bitcode objects when LTO is enabled.
+# A partial Kbuild succeeds with unresolved hooks. Check for global definitions
+# in both kernel and driver objects, including LLVM bitcode when LTO is enabled.
 verify_susfs_hook_linkage() {
   local llvm_nm="${CLANG_ROOT:?}/llvm-nm"
   local driver_objects="out/${KSU_DRIVER_DIR:?}/kernelsu"
   local object_file definitions required missing
   local caller_objects=(out/fs/exec.o out/security/selinux/hooks.o out/security/selinux/selinuxfs.o)
-  # Newer SUSFS defines its SELinux helpers in the kernel's services.o.
   local provider_objects=(out/fs/susfs.o out/security/selinux/ss/services.o)
   local ksu_objects=()
+
+  if [[ "$KSU_TYPE" == FinaSU* ]]; then
+    caller_objects+=(out/fs/open.o out/fs/read_write.o out/fs/stat.o out/fs/namespace.o
+      out/kernel/reboot.o out/kernel/sys.o "out/$KSU_DRIVER_DIR/input/input.o")
+    provider_objects+=("${caller_objects[@]}")
+  fi
 
   [[ -x "$llvm_nm" && -d "$driver_objects" ]] || {
     echo "::error::SUSFS hook linkage requires llvm-nm and compiled KernelSU objects."
@@ -295,11 +307,11 @@ verify_susfs_hook_linkage() {
     | awk '$2 == "U" && $1 ~ /^(__)?ksu_|^susfs_|^my_/ {print $1}' | sort -u)" || return 1
   missing="$(comm -23 <(printf '%s\n' "$required") <(printf '%s\n' "$definitions"))"
   if [[ -n "$missing" ]]; then
-    echo "::error::SUSFS kernel hooks require symbols absent from the compiled kernel/KernelSU objects:"
+    echo "::error::SUSFS hook symbols are missing from the compiled kernel and KernelSU providers:"
     printf '%s\n' "$missing"
     return 1
   fi
-  echo "[+] SUSFS exec and SELinux hooks match the compiled KernelSU/SUSFS symbols."
+  echo "[+] SUSFS exec and SELinux hooks match the compiled kernel and KernelSU symbols."
 }
 
 verify_nomount_source_integration() {

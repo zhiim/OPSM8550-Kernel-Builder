@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/lib/ksu-setup.sh"
 # shellcheck source=lib/finasu-manager.sh
 . "${SCRIPT_DIR}/lib/finasu-manager.sh"
+# shellcheck source=lib/finasu-integration.sh
+. "${SCRIPT_DIR}/lib/finasu-integration.sh"
 # shellcheck source=lib/ksu-uapi.sh
 . "${SCRIPT_DIR}/lib/ksu-uapi.sh"
 # shellcheck source=lib/kpm-image.sh
@@ -144,7 +146,8 @@ EXTRACT_CERT_SOURCE="$(detect_extract_cert_source)" || {
 }
 repair_extract_cert_key_pass_guard "$EXTRACT_CERT_SOURCE"
 install_ksu_variant "${KSU_TYPE}"
-if [[ "$KSU_TYPE" == FinaSU ]]; then
+apply_finasu_compat
+if [[ "$KSU_TYPE" == FinaSU* ]]; then
   python3 "${SCRIPT_DIR}/tests/finasu-manager-test.py" "$KSU_KERNEL_DIR"
 fi
 
@@ -174,7 +177,11 @@ if [[ "$KSU_TYPE" == *nomount* ]]; then
   : "${NOMOUNT_REPO:?}"
   : "${NOMOUNT_REF:?}"
   : "${NOMOUNT_COMMIT:?}"
-  install_nomount "$NOMOUNT_REPO" "$NOMOUNT_REF" "$NOMOUNT_COMMIT"
+  if [[ "$KSU_TYPE" == FinaSU* ]]; then
+    install_finasu_nomount
+  else
+    install_nomount "$NOMOUNT_REPO" "$NOMOUNT_REF" "$NOMOUNT_COMMIT"
+  fi
   verify_nomount_source_integration
 fi
 
@@ -213,13 +220,29 @@ fi
 if [[ "$KSU_TYPE" != "None" ]]; then
   require_config_enabled out/.config CONFIG_KSU
 fi
-if [[ "$KSU_TYPE" == FinaSU ]]; then
-  for key in CONFIG_KPROBES CONFIG_EXT4_FS CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KSU_DYNAMIC_MANAGER; do
+if [[ "$KSU_TYPE" == FinaSU* ]]; then
+  for key in CONFIG_KPROBES CONFIG_EXT4_FS CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_KSU_DYNAMIC_MANAGER CONFIG_HEADERS_INSTALL; do
     require_config_enabled out/.config "$key"
   done
-  for key in CONFIG_KSU_SUSFS CONFIG_KSU_DISABLE_MANAGER CONFIG_KSU_DISABLE_POLICY; do
+  for key in CONFIG_KSU_DISABLE_MANAGER CONFIG_KSU_DISABLE_POLICY CONFIG_KSU_DEBUG; do
     require_config_disabled out/.config "$key"
   done
+  if [[ "$KSU_TYPE" == *susfs* ]]; then
+    require_config_enabled out/.config CONFIG_THREAD_INFO_IN_TASK
+    require_config_enabled out/.config CONFIG_KSU_HOOK_SUSFS_INLINE
+    require_config_disabled out/.config CONFIG_KSU_HOOK_TRACEPOINT
+    sh "$KSU_KERNEL_DIR/tools/check_susfs_inline.sh" .
+  else
+    require_config_enabled out/.config CONFIG_HAVE_SYSCALL_TRACEPOINTS
+    require_config_enabled out/.config CONFIG_KSU_HOOK_TRACEPOINT
+    require_config_disabled out/.config CONFIG_KSU_SUSFS
+    require_config_disabled out/.config CONFIG_KSU_HOOK_SUSFS_INLINE
+  fi
+  # Driver-only smoke targets do not necessarily prepare UAPI headers. Install
+  # them first, then make missing preinit support fatal for every compile.
+  make "${MAKE_ARGS[@]}" headers_install
+  test -s out/usr/include/linux/unistd.h
+  MAKE_ARGS+=(KSU_REQUIRE_PREINIT=1)
 fi
 if [[ "$KSU_TYPE" == *susfs* ]]; then
   require_config_enabled  out/.config CONFIG_KSU_SUSFS
@@ -263,7 +286,7 @@ if [[ "$BUILD_MODE" == "Patch/config validation only" ]]; then
   COMPILE_SECONDS=$(($(date +%s) - COMPILE_STARTED_AT))
 
   SMOKE_TARGETS=()
-  if [[ "$KSU_TYPE" == FinaSU ]]; then
+  if [[ "$KSU_TYPE" == FinaSU* && "$KSU_TYPE" != *susfs* ]]; then
     SMOKE_TARGETS+=("${KSU_DRIVER_DIR}/kernelsu/")
   fi
   if [[ "$KSU_TYPE" == *susfs* ]]; then
@@ -275,6 +298,9 @@ if [[ "$BUILD_MODE" == "Patch/config validation only" ]]; then
       kernel/reboot.o
       "${KSU_DRIVER_DIR}/kernelsu/"
     )
+    if [[ "$KSU_TYPE" == FinaSU* ]]; then
+      SMOKE_TARGETS+=(fs/open.o fs/read_write.o fs/stat.o kernel/sys.o "${KSU_DRIVER_DIR}/input/input.o")
+    fi
   fi
   if [[ "$KSU_TYPE" == *nomount* ]]; then
     SMOKE_TARGETS+=("${NOMOUNT_FS_DIR}/nomount/nomount.o")
@@ -319,6 +345,9 @@ if [[ "$BUILD_MODE" == "Patch/config validation only" ]]; then
       verify_susfs_hook_linkage
       verify_susfs_binary_presence
     fi
+    if [[ "$KSU_TYPE" == FinaSU* ]]; then
+      verify_finasu_preinit_binary . finasu-preinit-proof.txt
+    fi
     if [[ "$KSU_TYPE" == *nomount* ]]; then
       verify_nomount_binary_presence
     fi
@@ -349,7 +378,24 @@ COMPILE_STARTED_AT="$(date +%s)"
   done
 ) &
 BUILD_RESOURCE_MONITOR_PID=$!
-if ! make -j"$(nproc)" "${MAKE_ARGS[@]}" Image 2>&1 | tee build.log; then
+if ! (
+  if [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] && grep -Fxq 'CONFIG_LTO_CLANG_FULL=y' out/.config; then
+    # Reclaim memory inside the build scope before Full LTO starves the runner.
+    memory_high_mib="$(awk '$1 == "MemTotal:" {print int($2 * 0.8 / 1024)}' /proc/meminfo)"
+    # Move only this subprocess so the log pipe and runner stay outside the scope.
+    if ! sudo -n systemd-run --scope --quiet --expand-environment=no \
+      --property="MemoryHigh=${memory_high_mib}M" -- bash -euc '
+        scope="$(cut -d: -f3 /proc/self/cgroup)"
+        [[ "$scope" == /*.scope ]]
+        printf "%s\n" "$1" > "/sys/fs/cgroup${scope}/cgroup.procs"
+      ' bash "$BASHPID"; then
+      echo "::error::Could not set up the hosted runner's Full LTO memory scope."
+      exit 1
+    fi
+    echo "[build] Full LTO memory.high set to ${memory_high_mib} MiB."
+  fi
+  exec make -j"$(nproc)" "${MAKE_ARGS[@]}" Image
+) 2>&1 | tee build.log; then
   COMPILE_SECONDS=$(($(date +%s) - COMPILE_STARTED_AT))
   ccache --show-stats || true
   echo "==== BUILD ERROR SUMMARY ===="
@@ -371,8 +417,9 @@ if ! strings out/arch/arm64/boot/Image | grep -F "Linux version ${KERNEL_RELEASE
   exit 1
 fi
 echo "[+] Kernel release identity verified: ${KERNEL_RELEASE}"
-if [[ "$KSU_TYPE" == FinaSU ]]; then
+if [[ "$KSU_TYPE" == FinaSU* ]]; then
   verify_finasu_manager_binary out/arch/arm64/boot/Image finasu-manager-proof.txt
+  verify_finasu_preinit_binary . finasu-preinit-proof.txt out/arch/arm64/boot/Image
 fi
 if [[ "$KSU_TYPE" == *susfs* ]]; then
   echo "==== SUSFS CONFIG SNAPSHOT ===="

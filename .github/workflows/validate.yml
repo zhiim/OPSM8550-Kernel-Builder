@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   finasu-manager:
-    name: Verify FinaSU release manager authentication
+    name: Verify FinaSU release pairing and built-in integration
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Test upstream signature matching and artifact gate
+      - name: Test release APK, upstream signature matching, stack usage, and preinit gates
         run: bash scripts/tests/finasu-manager-test.sh
 
   uapi-backports:
@@ -40,6 +40,18 @@ jobs:
           persist-credentials: false
       - name: Test composed upstream handlers
         run: bash scripts/tests/ksu-uapi-test.sh
+
+  finasu-features:
+    name: Verify FinaSU SUSFS and NoMount interfaces
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test all pinned SUSFS interfaces and the paired NoMount driver
+        run: bash scripts/tests/finasu-features-test.sh
 
   lint:
     runs-on: ubuntu-24.04
@@ -66,6 +78,7 @@ jobs:
           python3 scripts/tests/download-clang-test.py
           python3 scripts/tests/anykernel-slot-test.py
           python3 scripts/tests/build-rekernel-test.py
+          python3 scripts/tests/android-batch-test.py
 
       - name: Validate GitHub Actions workflows
         env:
